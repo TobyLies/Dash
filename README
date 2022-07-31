@@ -1,3 +1,9 @@
 Dash
 
 Creating an ECUMaster compatible dash using a CANBed Dual board: https://www.longan-labs.cc/1030019.html
+
+Partial code from:
+https://github.com/valtsu23/Emu_Black_DIY_screen_35.git
+https://github.com/MWP/megasquirt-dash-display.git
+https://www.winstar.com.tw/products/smart-display/can-display/wl0f0007000a8gaaasa01.html
+https://create.arduino.cc/projecthub/kenliao/vehicle-gui-can-bus-display-05fb45?ref=part&ref_id=8233&offset=1
