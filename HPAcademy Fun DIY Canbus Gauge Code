@@ -1,0 +1,603 @@
+// https://www.hpacademy.com/forum/off-topic-discussion/show/fun-diy-can-bus-gauge-project
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1351.h>
+#include <SdFat.h>
+#include <mcp_can.h>
+#include <SPI.h>
+
+SdFat SD;
+
+//CAN config
+unsigned int rxId;
+unsigned int nextId;
+unsigned char rxLen = 0;
+unsigned char rxBuf[8];
+volatile unsigned char canData = 0;
+int led = 23;
+int btnPeak = 21;
+int btnCycle = 8;
+int boostvalue_li = 0;
+float afrvalue_f = 0;
+float afrtarget_f = 0;
+int peakboostvalue_li = -100;
+float peakboostafrvalue_f = 0;
+int fetchpeakboostafr = 0;
+int peakmode = 0;
+float peakboostafrdelta_f=0;
+
+int displaytype=0; //0=2 items or 1=6 items displayed
+int sixMAPlabelXYpos[2] {3,3};
+int sixMAPvalueXYpos[2] {3,11};
+int sixECTlabelXYpos[2] {3,46};
+int sixECTvalueXYpos[2] {3,54};
+int sixAFRlabelXYpos[2] {0,88};
+int sixAFRvalueXYpos[2] {0,96};
+int sixOILplabelXYpos[2] {64,3};
+int sixOILpvalueXYpos[2] {64,11};
+int six4WDlabelXYpos[2] {64,46};
+int six4WDvalueXYpos[2] {64,54};
+int sixIATlabelXYpos[2] {65,88};
+int sixIATvalueXYpos[2] {82,96};
+
+int twoMAPlabelXYpos[2] {0,5};
+int twoAFRlabelXYpos[2] {0,69};
+int twoMAPvalueXYpos[2] {0,23};
+int twoAFRvalueXYpos[2] {0,85};
+
+int ectvalue=0;
+int iatvalue=0;
+int oilpvalue=0;
+int awdvalue=0;
+int peakectvalue=0;
+int peakiatvalue=0;
+int peakoilpvalue=0;
+int peakawdvalue=0;
+
+uint16_t bgcolor=0x0000;
+
+MCP_CAN CAN0(17);                                 // Set CS to pin 17
+
+//OLED display config
+// If we are using the hardware SPI interface, these are the pins (for future ref)
+#define sclk 13
+#define mosi 11
+#define OLED_CS   5
+#define rst  6
+#define dc   4
+
+// Color definitions
+#define BLACK           0x0000
+#define RED           (63<<11)|(0<<5)|(0)
+#define GREEN           (0<<11)|(63<<5)|(0)
+#define BLUE           (0<<11)|(0<<5)|(63)
+#define WHITE           0xEFBD //gray
+
+
+// to draw images from the SD card, we will share the hardware SPI interface
+Adafruit_SSD1351 tft = Adafruit_SSD1351(OLED_CS, dc, rst);
+
+//chip select for sd card
+#define SD_CS 10 
+File bmpFile;
+int bmpWidth, bmpHeight;
+uint8_t bmpDepth, bmpImageoffset;
+
+void setup()
+{
+  pinMode(led, OUTPUT);
+  pinMode(btnPeak, INPUT_PULLUP);
+  pinMode(btnCycle, INPUT_PULLUP);
+
+  Serial.begin(9600);
+  delay(1000);
+  int serialattempt = 0;
+//  while (!Serial && serialattempt<10) {
+//    delay(1000);
+//    serialattempt++; // wait 10 secs for serial port to connect. Needed for Leonardo only
+//  }
+  Serial.println("Serial port up!");
+  
+  initOLED();
+  tft.setTextWrap(false);
+  
+  delay(1000);
+  drawGTRlogo();
+  delay(2000);    //show logo for2 secs and then wipe screen
+
+  tft.fillScreen(bgcolor);
+  displaytype=0;//two item display by default
+  setlabels();
+
+   nextId=1000;
+   while(CAN_OK!=CAN0.begin(CAN_250KBPS))    //initialise CAN bus keep retrying indefinitley
+   {
+     //Serial.println("CAN init failed - retry..");
+     delay(100);
+   }
+   
+   // Bytes 1 and 2 of mask/filter apply to CAN ID
+   CAN0.init_Mask(0, 0, 0xFFFC); // 0b1111 1111 1111 1100   
+   CAN0.init_Filt(0, 0, 0x3E8); // 0b0000 0011 1110 1000 - canid1000 (16bit (motorola) rpm, 16bit (motorola)boostpresoffset -100,8bit water temp,8bit post IC temp, 8bit battery volts,8bit oil tmep
+   CAN0.init_Filt(1, 0, 0xFFFF); // 1111 1111 1111 1111 - FAIL
+
+   CAN0.init_Mask(1, 0, 0xFFFF); // 1111 1111 1111 1111
+   CAN0.init_Filt(2, 0, 0x0001); // 0000 0000 0000 0001 - FAIL
+   CAN0.init_Filt(3, 0, 0x0001); // 0000 0000 0000 0001 - FAIL
+   CAN0.init_Filt(4, 0, 0x0001); // 0000 0000 0000 0001 - FAIL 
+   CAN0.init_Filt(5, 0, 0x0001); // 0000 0000 0000 0001 - FAIL  
+}
+
+void setlabels(){
+  if(displaytype==1){
+    drawECTlabel();
+    drawIATlabel();
+    drawOILPlabel();
+    drawAWDlabel();
+  }
+  drawboostlabel(WHITE);
+  drawafrlabel(WHITE);    
+}
+
+void loop()
+{
+  if((digitalRead(btnPeak)==LOW)&& (digitalRead(btnCycle)==LOW)){
+        peakectvalue=0;
+        peakiatvalue=0;
+        peakoilpvalue=0;
+        peakawdvalue=0;
+        peakboostvalue_li = -100;
+        peakboostafrvalue_f = 0;
+        peakboostafrdelta_f=0;    
+        tft.fillScreen(bgcolor);
+        delay(2000);  
+        setlabels();
+  }
+  if(digitalRead(btnPeak)==LOW) {
+        peakmode=!peakmode;
+        if(peakmode==1)bgcolor=((5<<11)|(0<<5)|(5));
+        if(peakmode==0)bgcolor=BLACK;
+        tft.fillScreen(bgcolor);
+        setlabels();
+  }
+  if(digitalRead(btnCycle)==LOW) {
+        displaytype=!displaytype;   
+        tft.fillScreen(bgcolor);
+        setlabels();
+  }
+  if (peakmode==1){
+    if(displaytype==1){
+      drawectvalue(peakectvalue);      
+      drawiatvalue(peakiatvalue);      
+      drawawdvalue(peakawdvalue);      
+      drawoilpvalue(peakoilpvalue);      
+    }
+    drawboostvalue(peakboostvalue_li);
+    drawafrvalue(peakboostafrvalue_f,peakboostafrdelta_f);
+  } else {
+       if(CAN_MSGAVAIL == CAN0.checkReceive())   // check if data waiting
+     {
+        CAN0.readMsgBuf(&rxLen, rxBuf);            // Read data: len = data length, buf = data byte(s)
+        rxId = CAN0.getCanId();                    // Get message ID        
+        if((rxId==1000)&&(nextId==1000))
+        {
+          nextId=1001;
+          boostvalue_li=word(rxBuf[2],rxBuf[3]);
+          boostvalue_li=boostvalue_li;
+          drawboostvalue(boostvalue_li);
+          if(peakboostvalue_li<boostvalue_li){
+            fetchpeakboostafr=1;
+            peakboostvalue_li=boostvalue_li;
+          }
+          if (displaytype==1){
+            ectvalue=rxBuf[4]-50;
+            if (ectvalue>peakectvalue)peakectvalue=ectvalue;
+            drawectvalue(ectvalue);
+            iatvalue=rxBuf[5]-50;
+            if (iatvalue>peakiatvalue)peakiatvalue=iatvalue;
+            drawiatvalue(iatvalue);
+            oilpvalue=word(rxBuf[6],rxBuf[7]);
+            if (oilpvalue>peakoilpvalue)peakoilpvalue=oilpvalue;
+            drawoilpvalue(oilpvalue);
+          }
+        }
+        //read the alternate stream id1001  
+        if((rxId==1001)&&(nextId==1001))
+        {
+          nextId=1000;
+          afrvalue_f=word(rxBuf[2],rxBuf[3]); //div by 1000 to give lambda then *14.68 for AFR
+          afrvalue_f=(afrvalue_f/1000)*14.7;
+          afrtarget_f=word(rxBuf[4],rxBuf[5]); //div by 1000 to give lambda then *14.68 for AFR
+          afrtarget_f=(afrtarget_f/1000)*14.7;
+          drawafrvalue(afrvalue_f,afrvalue_f-afrtarget_f);
+          if(fetchpeakboostafr==1){
+            fetchpeakboostafr=0;
+            peakboostafrvalue_f=afrvalue_f;
+            peakboostafrdelta_f=afrvalue_f-afrtarget_f;
+          }
+          if (displaytype==1){
+            awdvalue=word(rxBuf[6],rxBuf[7]);
+            if (awdvalue>peakawdvalue)peakawdvalue=awdvalue;
+            drawawdvalue(awdvalue);
+          }
+        }
+     }
+  }
+}
+
+
+void drawboostlabel(uint16_t color){
+  if (displaytype==0){
+      tft.setCursor(twoMAPlabelXYpos[0], twoMAPlabelXYpos[1]);
+      tft.setTextSize(2);
+  } else {
+      tft.setCursor(sixMAPlabelXYpos[0], sixMAPlabelXYpos[1]);    
+      tft.setTextSize(1);
+  }
+  
+  tft.setTextColor(color);  
+  tft.println("MAP kPa");
+}
+
+void drawafrlabel(uint16_t color){
+  if (displaytype==0){
+      tft.setCursor(twoAFRlabelXYpos[0], twoAFRlabelXYpos[1]);
+      tft.setTextSize(2);
+  } else {
+      tft.setCursor(sixAFRlabelXYpos[0], sixAFRlabelXYpos[1]);    
+      tft.setTextSize(1);
+  }
+  tft.setTextColor(color);  
+  tft.println("AFR");  
+}
+
+void drawECTlabel(){
+  tft.setCursor(sixECTlabelXYpos[0], sixECTlabelXYpos[1]);
+  tft.setTextSize(1);
+  tft.setTextColor(WHITE);  
+  tft.println("ECT deg c");  
+}
+void drawIATlabel(){
+  tft.setCursor(sixIATlabelXYpos[0], sixIATlabelXYpos[1]);
+  tft.setTextSize(1);
+  tft.setTextColor(WHITE);  
+  tft.println("IAT deg c");  
+}
+void drawAWDlabel(){
+  tft.setCursor(six4WDlabelXYpos[0], six4WDlabelXYpos[1]);
+  tft.setTextSize(1);
+  tft.setTextColor(WHITE);  
+  tft.println("4WD PSI");  
+}
+void drawOILPlabel(){
+  tft.setCursor(sixOILplabelXYpos[0], sixOILplabelXYpos[1]);
+  tft.setTextSize(1);
+  tft.setTextColor(WHITE);  
+  tft.println("OIL kPa");  
+}
+
+void drawafrvalue(float afrvalue,float afrdelta){
+  int i_t;
+
+ // i_t= int((afrvalue*10)+0.5);
+ // afrvalue=float(i_t)/10;
+ // i_t= int((afrdelta*10)+0.5);
+ // afrvalue=float(i_t)/10;
+
+  if (displaytype==0){
+    //show the realtime peak only in 2 item display 
+    tft.setCursor(69, 69);
+    tft.setTextSize(2);
+    tft.print(" ");
+    tft.setTextColor(getAFRColor(peakboostafrdelta_f),bgcolor);  
+    tft.println(peakboostafrvalue_f);
+    //set position and size for value
+    tft.setCursor(twoAFRvalueXYpos[0], twoAFRvalueXYpos[1]);
+    tft.setTextSize(4);
+    tft.print(" ");
+  } else {
+    tft.setCursor(sixAFRvalueXYpos[0], sixAFRvalueXYpos[1]);
+    tft.setTextSize(3);
+  }  
+
+  tft.setTextColor(getAFRColor(afrdelta),bgcolor);  
+  tft.println(afrvalue,1);
+
+}
+
+void drawboostvalue(int boostvalue){
+
+  if (displaytype==0){
+  //show the realtime peak in 2 item display
+    tft.setCursor(69, 5);
+    tft.setTextSize(2);
+    if(abs(peakboostvalue_li)<10) tft.print(" ");    
+    if(abs(peakboostvalue_li)<100) tft.print(" ");    
+    if(peakboostvalue_li>-1) tft.print(" ");
+    tft.print(" ");
+    tft.setTextColor(getBoostColor(peakboostvalue_li),bgcolor);
+    tft.println(peakboostvalue_li);
+    tft.setCursor(twoMAPvalueXYpos[0], twoMAPvalueXYpos[1]);
+    tft.setTextSize(4);
+    if(boostvalue>-1) tft.print(" ");
+    tft.print(" ");
+  }  else {    
+    tft.setCursor(sixMAPvalueXYpos[0], sixMAPvalueXYpos[1]);
+    tft.setTextSize(3);
+  }
+
+  tft.setTextColor(getBoostColor(boostvalue),bgcolor);
+  if(abs(boostvalue)<10) tft.print(" ");    
+  if(abs(boostvalue)<100) tft.print(" ");    
+  tft.println(boostvalue);        
+
+}
+
+void drawectvalue(int ectvalue){
+  tft.setCursor(sixECTvalueXYpos[0], sixECTvalueXYpos[1]);
+  tft.setTextSize(3);
+  tft.setTextColor(getECTColor(ectvalue),bgcolor);
+  if(ectvalue<100)tft.print(" ");
+  tft.println(ectvalue);
+}
+void drawiatvalue(int iatvalue){
+  tft.setCursor(sixIATvalueXYpos[0], sixIATvalueXYpos[1]);
+  tft.setTextSize(3);
+  tft.setTextColor(getIATColor(iatvalue),bgcolor);
+  tft.println(iatvalue);
+}
+
+void drawawdvalue(int awdvalue){
+  tft.setCursor(six4WDvalueXYpos[0], six4WDvalueXYpos[1]);
+  tft.setTextSize(3);
+  tft.setTextColor(getAWDColor(awdvalue),bgcolor);
+  if(awdvalue<100)tft.print(" ");
+  tft.println(awdvalue);
+}
+void drawoilpvalue(int oilpvalue){
+  tft.setCursor(sixOILpvalueXYpos[0], sixOILpvalueXYpos[1]);
+  tft.setTextSize(3);
+  tft.setTextColor(getOILPColor(oilpvalue),bgcolor);
+  if(oilpvalue<100)tft.print(" ");
+  if(oilpvalue<10)tft.print(" ");
+  tft.println(oilpvalue);
+}
+
+
+#define BUFFPIXEL 20
+
+void bmpDraw(char *filename, uint8_t x, uint8_t y) {
+
+  File     bmpFile;
+  int      bmpWidth, bmpHeight;   // W+H in pixels
+  uint8_t  bmpDepth;              // Bit depth (currently must be 24)
+  uint32_t bmpImageoffset;        // Start of image data in file
+  uint32_t rowSize;               // Not always = bmpWidth; may have padding
+  uint8_t  sdbuffer[3*BUFFPIXEL]; // pixel buffer (R+G+B per pixel)
+  uint8_t  buffidx = sizeof(sdbuffer); // Current position in sdbuffer
+  boolean  goodBmp = false;       // Set to true on valid header parse
+  boolean  flip    = true;        // BMP is stored bottom-to-top
+  int      w, h, row, col;
+  uint8_t  r, g, b;
+  uint32_t pos = 0, startTime = millis();
+
+  if((x >= tft.width()) || (y >= tft.height())) return;
+
+  // Open requested file on SD card
+  if ((bmpFile = SD.open(filename)) == NULL) {
+    Serial.print("File not found");
+    return;
+  }
+
+  // Parse BMP header
+  if(read16(bmpFile) == 0x4D42) { // BMP signature
+    Serial.print("File size: "); Serial.println(read32(bmpFile));
+    (void)read32(bmpFile); // Read & ignore creator bytes
+    bmpImageoffset = read32(bmpFile); // Start of image data
+    Serial.print("Image Offset: "); Serial.println(bmpImageoffset, DEC);
+    // Read DIB header
+    Serial.print("Header size: "); Serial.println(read32(bmpFile));
+    bmpWidth  = read32(bmpFile);
+    bmpHeight = read32(bmpFile);
+    if(read16(bmpFile) == 1) { // # planes -- must be '1'
+      bmpDepth = read16(bmpFile); // bits per pixel
+      Serial.print("Bit Depth: "); Serial.println(bmpDepth);
+      if((bmpDepth == 24) && (read32(bmpFile) == 0)) { // 0 = uncompressed
+        goodBmp = true; // Supported BMP format -- proceed!
+        // BMP rows are padded (if needed) to 4-byte boundary
+        rowSize = (bmpWidth * 3 + 3) & ~3;
+
+        // If bmpHeight is negative, image is in top-down order.
+        // This is not canon but has been observed in the wild.
+        if(bmpHeight < 0) {
+          bmpHeight = -bmpHeight;
+          flip      = false;
+        }
+
+        // Crop area to be loaded
+        w = bmpWidth;
+        h = bmpHeight;
+        if((x+w-1) >= tft.width())  w = tft.width()  - x;
+        if((y+h-1) >= tft.height()) h = tft.height() - y;
+
+        for (row=0; row<h; row++) { // For each scanline...
+          tft.goTo(x, y+row);
+
+          // Seek to start of scan line.  It might seem labor-
+          // intensive to be doing this on every line, but this
+          // method covers a lot of gritty details like cropping
+          // and scanline padding.  Also, the seek only takes
+          // place if the file position actually needs to change
+          // (avoids a lot of cluster math in SD library).
+          if(flip) // Bitmap is stored bottom-to-top order (normal BMP)
+            pos = bmpImageoffset + (bmpHeight - 1 - row) * rowSize;
+          else     // Bitmap is stored top-to-bottom
+            pos = bmpImageoffset + row * rowSize;
+          if(bmpFile.position() != pos) { // Need seek?
+            bmpFile.seek(pos);
+            buffidx = sizeof(sdbuffer); // Force buffer reload
+          }
+
+          // optimize by setting pins now
+          for (col=0; col<w; col++) { // For each pixel...
+            // Time to read more pixel data?
+            if (buffidx >= sizeof(sdbuffer)) { // Indeed
+              bmpFile.read(sdbuffer, sizeof(sdbuffer));
+              buffidx = 0; // Set index to beginning
+            }
+
+            // Convert pixel from BMP to TFT format, push to display
+            b = sdbuffer[buffidx++];
+            g = sdbuffer[buffidx++];
+            r = sdbuffer[buffidx++];
+
+            tft.drawPixel(x+col, y+row, tft.Color565(r,g,b));
+            // optimized!
+            //tft.pushColor(tft.Color565(r,g,b));
+          } // end pixel
+        } // end scanline
+        Serial.print("Loaded in ");
+        Serial.print(millis() - startTime);
+        Serial.println(" ms");
+      } // end goodBmp
+    }
+  }
+
+  bmpFile.close();
+  if(!goodBmp) Serial.println("BMP format not recognized.");
+}
+
+
+uint16_t read16(File& f) {
+  uint16_t result;
+  ((uint8_t *)&result)[0] = f.read(); // LSB
+  ((uint8_t *)&result)[1] = f.read(); // MSB
+  return result;
+}
+
+uint32_t read32(File& f) {
+  uint32_t result;
+  ((uint8_t *)&result)[0] = f.read(); // LSB
+  ((uint8_t *)&result)[1] = f.read();
+  ((uint8_t *)&result)[2] = f.read();
+  ((uint8_t *)&result)[3] = f.read(); // MSB
+  return result;
+}
+
+void initOLED()
+{
+    // initialize the OLED
+  pinMode(OLED_CS, OUTPUT);
+  digitalWrite(OLED_CS, HIGH);     
+  Serial.println("init OLED");  
+  tft.begin();  
+  tft.fillScreen(BLACK);
+}
+
+
+void drawGTRlogo()
+{
+  // initialize the SD
+  //Serial.print("Initializing SD card...");
+  if (!SD.begin(SD_CS,SPI_FULL_SPEED)) {
+        SD.initErrorHalt();
+  }
+  bmpDraw("gtr.bmp", 0, 0);
+}
+
+
+uint16_t getBoostColor(int y)
+{
+  y=y-100;
+  //<-40=purple (15/0/31)
+  if(y<-40)  {
+    return  (15<<11)|(0<<5)|(31);
+  }
+  
+  //-40 to -10 add green 1 per tick, remove red 1 per two ticks until (0/31/31)
+  //  R -40=15 -10=0  so x=(abs(y)-10)/2
+  //  G -40=0 -10=31 so x=abs(y)-10
+  //  B -40=31 -10=31 so x=31
+  if(y>-41&&y<-10){
+    return (((abs(y)-10)/2)<<11)|((abs(y)-10)<<5)|31;
+  }
+  
+  //-10 to 5 add green 2 per tick, remove blue 1 per tick until (0/63/15)
+  //  R -10=0 5=0  so x=0
+  //  G -10=31 5=63 so x=(y+25)*2
+  //  B -10=31 5=15 so x=abs(y-5)+15
+  if(y>-11&&y<5){
+    return  (0<<11)|(((y+25)*2)<<5)|(abs(y-5)+15);
+  }
+  
+  //5 to 50 take blue 1 per 3 ticks until (0/63/0)
+  //  R 5=0 50=0  so x=0
+  //  G 5=63 50=63 so x=63
+  //  B 5=15 50=0 so x=abs(((y-5)/3)-15)
+  if(y>4&&y<50){
+    return (0<<11)|(63<<5)|(abs(((y-5)/3)-15));
+  }
+  
+  //50 to 110 add red 1 per 2 ticks until (31/63/0)
+  //  R 50=0 110=31  so x=(y-50)/2
+  //  G 50=63 110=63 so x=63
+  //  B 50=0 110=0 so x=0
+  if(y>49&&y<110){
+    return (((y-50)/2)<<11)|(63<<5)|(0);
+  }
+  
+  //110 to 140 take green 2 per tick until (31/0/0)
+  //  R 110=31 140=31  so x=31
+  //  G 110=63 140=0 so x=abs((y-170))/2
+  //  B 110=0 140=0 so x=0
+  if(y>109&&y<140){
+    return  (31<<11)|((abs((y-170))/2)<<5)|(0);
+  }
+  
+  //140+ red
+  if(y>139){
+    return  (31<<11)|(0<<5)|(0);
+  }
+}
+
+uint16_t getAFRColor(float y)
+{
+  if(y>=1.5)  { //lean red
+    return  (63<<11)|(31<<5)|(0);
+  }  
+  if(y<1.5&&y>=1.0)  { 
+    return  (31<<11)|(31<<5)|(0);
+  }  
+  if(y<1.0&&y>=0){
+    return  (15<<11)|(31<<5)|(0);
+  }
+  if(y<0&&y>=-1.0){// green good
+    return (0<<11)|(63<<5)|(0);
+  }
+  if(y<-1.0&&y>=-1.5){//green blue slightly rich
+    return  (0<<11)|(63<<5)|(15);
+  }
+  if(y<-1.5){// rich cool blue
+    return  (0<<11)|(31<<5)|(31);
+  }
+}
+uint16_t getECTColor(int y)
+{
+  if(y<50)return BLUE;
+  if(y>102)return RED;
+  if((y>=50)&&(y<=102))return GREEN;
+}
+uint16_t getIATColor(int y)
+{
+  if(y<20)return BLUE;
+  if(y>40)return RED;
+  if((y>=20)&&(y<=40))return GREEN;
+}
+uint16_t getOILPColor(int y)
+{
+  return WHITE;
+}
+uint16_t getAWDColor(int y)
+{
+  return WHITE;
+}
